@@ -11,7 +11,8 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = ["gemini-3.7-flash"]  # tried only if the main model returns 404
 MAX_RESUME_CHARS = 20000
 MAX_FILE_MB = 5
 
@@ -224,15 +225,24 @@ def normalize_result(data: dict) -> dict:
 
 def analyze_with_gemini(resume_text: str, job_description: str, api_key: str, model: str) -> dict:
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=build_prompt(resume_text, job_description),
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-        ),
-    )
-    return normalize_result(parse_json_response(response.text))
+    prompt = build_prompt(resume_text, job_description)
+    candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
+    last_error = None
+    for name in candidates:
+        try:
+            response = client.models.generate_content(
+                model=name,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            return normalize_result(parse_json_response(response.text))
+        except Exception as exc:
+            # Only move on to the next model if this one is missing/retired.
+            if "404" in str(exc) or "NOT_FOUND" in str(exc):
+                last_error = exc
+                continue
+            raise
+    raise last_error
 
 
 def final_score(ai_score: int, rule_score: int) -> int:
